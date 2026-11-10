@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ビンゴ大会</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Babel for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- ESM Import Maps -->
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "canvas-confetti": "https://esm.sh/canvas-confetti@1.9.2"
+      }
+    }
+  </script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module">
+    import React, { useState, useEffect, useMemo } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import confetti from 'canvas-confetti';
+
+    const ADMIN_PASSCODE = "katosora0327";
+
+    // ビンゴカードの列番号生成関数
+    const generateCard = () => {
+      const getColumn = (min, max, count) => {
+        const nums = Array.from({ length: max - min + 1 }, (_, i) => min + i);
+        return nums.sort(() => Math.random() - 0.5).slice(0, count);
+      };
+      const b = getColumn(1, 15, 5);
+      const i = getColumn(16, 30, 5);
+      const n = getColumn(31, 45, 4); // 中央FREE用
+      const g = getColumn(46, 60, 5);
+      const o = getColumn(61, 75, 5);
+
+      const grid = [];
+      for (let row = 0; row < 5; row++) {
+        const rowData = [];
+        rowData.push({ num: b[row], marked: false });
+        rowData.push({ num: i[row], marked: false });
+        if (row === 2) {
+          rowData.push({ num: 'FREE', marked: true });
+        } else {
+          const nIndex = row > 2 ? row - 1 : row;
+          rowData.push({ num: n[nIndex], marked: false });
+        }
+        rowData.push({ num: g[row], marked: false });
+        rowData.push({ num: o[row], marked: false });
+        grid.push(rowData);
+      }
+      return grid;
+    };
+
+    function App() {
+      const [mode, setMode] = useState('player'); // 'player' | 'admin_login' | 'admin'
+      const [passcodeInput, setPasscodeInput] = useState('');
+      const [passcodeError, setPasscodeError] = useState(false);
+
+      // ゲーム状態 (BroadcastChannel & localStorage で同期)
+      const [drawnNumbers, setDrawnNumbers] = useState(() => {
+        const saved = localStorage.getItem('bingo_drawn');
+        return saved ? JSON.parse(saved) : [];
+      });
+      const [currentNumber, setCurrentNumber] = useState(() => {
+        const saved = localStorage.getItem('bingo_current');
+        return saved ? JSON.parse(saved) : null;
+      });
+
+      // 参加者のカード状態
+      const [card, setCard] = useState(() => {
+        const saved = localStorage.getItem('bingo_user_card');
+        return saved ? JSON.parse(saved) : generateCard();
+      });
+
+      // 状態の同期設定
+      useEffect(() => {
+        const channel = new BroadcastChannel('bingo_channel');
+        channel.onmessage = (e) => {
+          if (e.data.type === 'SYNC') {
+            setDrawnNumbers(e.data.drawnNumbers);
+            setCurrentNumber(e.data.currentNumber);
+          }
+        };
+        return () => channel.close();
+      }, []);
+
+      const broadcastState = (newDrawn, newCurrent) => {
+        setDrawnNumbers(newDrawn);
+        setCurrentNumber(newCurrent);
+        localStorage.setItem('bingo_drawn', JSON.stringify(newDrawn));
+        localStorage.setItem('bingo_current', JSON.stringify(newCurrent));
+
+        const channel = new BroadcastChannel('bingo_channel');
+        channel.postMessage({ type: 'SYNC', drawnNumbers: newDrawn, currentNumber: newCurrent });
+        channel.close();
+      };
+
+      // 抽選実行 (管理者)
+      const drawNextNumber = () => {
+        const remaining = Array.from({ length: 75 }, (_, i) => i + 1)
+          .filter(n => !drawnNumbers.includes(n));
+
+        if (remaining.length === 0) return;
+
+        const next = remaining[Math.floor(Math.random() * remaining.length)];
+        const updatedDrawn = [...drawnNumbers, next];
+        broadcastState(updatedDrawn, next);
+
+        confetti({ particleCount: 50, spread: 60, origin: { y: 0.6 } });
+      };
+
+      // ゲームリセット (管理者)
+      const resetGame = () => {
+        if (confirm('すべての抽選履歴をリセットしますか？')) {
+          broadcastState([], null);
+        }
+      };
+
+      // パスコード認証
+      const handleAdminAuth = (e) => {
+        e.preventDefault();
+        if (passcodeInput === ADMIN_PASSCODE) {
+          setMode('admin');
+          setPasscodeInput('');
+          setPasscodeError(false);
+        } else {
+          setPasscodeError(true);
+        }
+      };
+
+      // マス目のタップ処理 (参加者)
+      const toggleCell = (rIdx, cIdx) => {
+        if (card[rIdx][cIdx].num === 'FREE') return;
+        const newCard = card.map((row, r) =>
+          row.map((cell, c) => {
+            if (r === rIdx && c === cIdx) {
+              return { ...cell, marked: !cell.marked };
+            }
+            return cell;
+          })
+        );
+        setCard(newCard);
+        localStorage.setItem('bingo_user_card', JSON.stringify(newCard));
+      };
+
+      // ビンゴ判定
+      const checkStatus = useMemo(() => {
+        let lines = 0;
+        // 横
+        for (let r = 0; r < 5; r++) {
+          if (card[r].every(cell => cell.marked)) lines++;
+        }
+        // 縦
+        for (let c = 0; c < 5; c++) {
+          if (card.every(row => row[c].marked)) lines++;
+        }
+        // 斜め
+        if ([0,1,2,3,4].every(i => card[i][i].marked)) lines++;
+        if ([0,1,2,3,4].every(i => card[i][4-i].marked)) lines++;
+
+        return lines > 0 ? `BINGO! (${lines}ライン)` : '';
+      }, [card]);
+
+      return (
+        <div className="max-w-md mx-auto p-4 min-h-screen flex flex-col justify-between">
+          {/* ヘッダー */}
+          <header className="flex justify-between items-center border-b border-slate-700 pb-3 mb-4">
+            <h1 className="text-xl font-bold text-amber-400 tracking-wider">🎉 ビンゴ大会</h1>
+            <div>
+              {mode === 'player' ? (
+                <button
+                  onClick={() => setMode('admin_login')}
+                  className="px-3 py-1 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-600"
+                >
+                  管理者画面へ
+                </button>
+              ) : (
+                <button
+                  onClick={() => setMode('player')}
+                  className="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded font-medium"
+                >
+                  参加者画面へ戻る
+                </button>
+              )}
+            </div>
+          </header>
+
+          {/* モード1: 参加者画面 */}
+          {mode === 'player' && (
+            <main className="space-y-6">
+              {/* 最新の当選番号 */}
+              <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 text-center">
+                <span className="text-xs uppercase tracking-widest text-slate-400 block mb-1">現在の抽出番号</span>
+                <div className="text-5xl font-black text-amber-400 my-2">
+                  {currentNumber ?? '--'}
+                </div>
+                <div className="text-xs text-slate-400 mt-2">
+                  出た数字の数: {drawnNumbers.length} / 75
+                </div>
+              </div>
+
+              {/* ビンゴ状態 */}
+              {checkStatus && (
+                <div className="bg-amber-500/20 border border-amber-500/50 text-amber-300 text-center py-2 rounded-lg font-bold animate-bounce">
+                  🎉 {checkStatus} 🎉
+                </div>
+              )}
+
+              {/* ビンゴカード */}
+              <div>
+                <div className="grid grid-cols-5 text-center font-bold text-amber-400 mb-1">
+                  <span>B</span><span>I</span><span>N</span><span>G</span><span>O</span>
+                </div>
+                <div className="grid grid-cols-5 gap-1.5 bg-slate-800 p-2 rounded-xl border border-slate-700">
+                  {card.map((row, rIdx) =>
+                    row.map((cell, cIdx) => {
+                      const isDrawn = cell.num !== 'FREE' && drawnNumbers.includes(cell.num);
+                      return (
+                        <button
+                          key={`${rIdx}-${cIdx}`}
+                          onClick={() => toggleCell(rIdx, cIdx)}
+                          className={`aspect-square flex flex-col items-center justify-center rounded-lg font-bold text-base transition-all ${
+                            cell.marked
+                              ? 'bg-amber-500 text-slate-900 shadow-lg scale-95'
+                              : isDrawn
+                              ? 'bg-slate-700 text-amber-300 border-2 border-amber-400/60 animate-pulse'
+                              : 'bg-slate-900/80 text-slate-200 border border-slate-700 hover:border-slate-500'
+                          }`}
+                        >
+                          {cell.num}
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-400 text-center mt-2">
+                  ※ 出た数字をタップして穴を開けられます（黄枠は当選中の番号）
+                </p>
+              </div>
+
+              {/* 出た数字一覧 */}
+              <div className="bg-slate-800/60 border border-slate-700/60 p-3 rounded-xl">
+                <span className="text-xs text-slate-400 block mb-2 font-medium">これまでの当選番号一覧</span>
+                <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto pr-1">
+                  {drawnNumbers.length === 0 ? (
+                    <span className="text-xs text-slate-500">まだ抽選されていません</span>
+                  ) : (
+                    drawnNumbers.map(n => (
+                      <span key={n} className="px-2 py-0.5 bg-slate-700 text-amber-300 rounded text-xs font-mono font-bold">
+                        {n}
+                      </span>
+                    ))
+                  )}
+                </div>
+              </div>
+            </main>
+          )}
+
+          {/* モード2: 管理者パスコード認証 */}
+          {mode === 'admin_login' && (
+            <main className="flex-1 flex items-center justify-center">
+              <form onSubmit={handleAdminAuth} className="w-full bg-slate-800 p-6 rounded-xl border border-slate-700 space-y-4">
+                <h2 className="text-lg font-bold text-slate-100 text-center">🔒 管理者認証</h2>
+                <div>
+                  <input
+                    type="password"
+                    placeholder="パスコードを入力"
+                    value={passcodeInput}
+                    onChange={(e) => setPasscodeInput(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+                  />
+                  {passcodeError && (
+                    <p className="text-rose-400 text-xs mt-2">パスコードが違います</p>
+                  )}
+                </div>
+                <button
+                  type="submit"
+                  className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg transition"
+                >
+                  ログイン
+                </button>
+              </form>
+            </main>
+          )}
+
+          {/* モード3: 管理者操作画面 */}
+          {mode === 'admin' && (
+            <main className="space-y-6">
+              <div className="bg-indigo-950/40 border border-indigo-500/30 rounded-xl p-6 text-center">
+                <span className="text-xs text-indigo-300 font-semibold tracking-widest block mb-2">管理者ルーレット</span>
+                <div className="text-7xl font-black text-amber-400 my-4">
+                  {currentNumber ?? '--'}
+                </div>
+                <button
+                  onClick={drawNextNumber}
+                  disabled={drawnNumbers.length >= 75}
+                  className="w-full py-4 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-900 font-black text-xl rounded-xl shadow-lg transition active:scale-95 disabled:opacity-50"
+                >
+                  {drawnNumbers.length >= 75 ? '全数字が出ました' : '番号を引く！'}
+                </button>
+              </div>
+
+              {/* 履歴とリセット */}
+              <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-slate-300 font-bold">抽選済み ({drawnNumbers.length}/75)</span>
+                  <button
+                    onClick={resetGame}
+                    className="text-xs px-2.5 py-1 bg-rose-950/60 hover:bg-rose-900 border border-rose-800 text-rose-300 rounded"
+                  >
+                    リセット
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto">
+                  {drawnNumbers.map((n, i) => (
+                    <span key={n} className={`px-2 py-1 rounded text-xs font-mono font-bold ${i === drawnNumbers.length - 1 ? 'bg-amber-400 text-slate-900' : 'bg-slate-700 text-slate-300'}`}>
+                      {n}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </main>
+          )}
+
+          <footer className="text-center text-[10px] text-slate-500 pt-6">
+            Bingo Event System
+          </footer>
+        </div>
+      );
+    }
+
+    createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
